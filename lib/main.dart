@@ -66,7 +66,7 @@ class _ShellState extends State<Shell> {
       params = WebKitWebViewControllerCreationParams(
         allowsInlineMediaPlayback: true,
         // Lets the Web Audio context start without a tap inside the page.
-        mediaTypesRequiringUserAction: const <PlaybackMediaType>{},
+        mediaTypesRequiringUserAction: const {},
       );
     }
     _web = WebViewController.fromPlatformCreationParams(params)

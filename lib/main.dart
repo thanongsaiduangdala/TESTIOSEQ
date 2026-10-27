@@ -75,7 +75,12 @@ class _ShellState extends State<Shell> {
     _web = WebViewController.fromPlatformCreationParams(params)
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setUserAgent(_safariUa) // Google sign-in rejects the default WKWebView UA
-      ..setNavigationDelegate(NavigationDelegate(onPageFinished: (_) => _inject()))
+      ..setNavigationDelegate(NavigationDelegate(
+        // Early injection catches the new document if WebKit allows it; the
+        // script is idempotent, so the second call on finish is harmless.
+        onPageStarted: (_) => _inject(),
+        onPageFinished: (_) => _inject(),
+      ))
       ..loadRequest(Uri.parse('https://music.youtube.com'));
     _poll = Timer.periodic(const Duration(seconds: 1), (_) => _refreshStatus());
   }
@@ -164,6 +169,10 @@ class _ShellState extends State<Shell> {
       'idle' => (Icons.touch_app, Colors.lightBlueAccent, 'Ready. Move a slider or pick a preset'),
       'waiting' => (Icons.hourglass_empty, Colors.amber, 'Play a song in YT Music'),
       'blocked' => (Icons.lock_outline, Colors.amber, 'Audio engine waiting. Tap play in YT Music'),
+      'preparing' => (Icons.graphic_eq, Colors.amber, 'Preparing audio… (play a song)'),
+      'bypass' => (Icons.power_settings_new, Colors.grey, 'Sound effects are off. Playing the original audio'),
+      'late' => (Icons.skip_next, Colors.amber, 'Engine started too late for this song. Skip to the next one'),
+      'fallback' => (Icons.warning_amber, Colors.orangeAccent, 'Can\'t process this stream. Playing the original audio'),
       'silent' => (Icons.volume_off, Colors.redAccent, 'No signal. This stream can\'t be processed on this iPhone'),
       'off' => (Icons.power_settings_new, Colors.grey, 'Audio engine is off'),
       'none' => (Icons.hourglass_empty, Colors.amber, 'Loading…'),
@@ -189,8 +198,10 @@ class _ShellState extends State<Shell> {
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
                 child: SelectableText(
-                  'ctx ${d['ctx']} · hooked ${d['hooked']} · media ${d['media']} · '
-                  'paused ${d['paused']} · src ${d['src']}'
+                  'ctx ${d['ctx']} · mode ${d['mode']} · live ${d['live']} · '
+                  'segs ${d['segs']} (decoded ${d['dec']}) · dec ${d['dmode']} · '
+                  'dl ${d['dl']}ms · paused ${d['paused']} · src ${d['src']} · '
+                  'mime ${d['mime']}'
                   '${(d['err'] ?? '').toString().isEmpty ? '' : ' · err ${d['err']}'}',
                   style: small?.copyWith(color: Colors.grey),
                 ),

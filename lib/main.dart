@@ -52,10 +52,13 @@ class _ShellState extends State<Shell> {
   Timer? _poll;
   int _tab = 0;
   bool _engineOn = true; // inject the audio engine at all
+  bool _armed = false; // user has touched a control => engine may hook the player
   bool _fxOn = true; // effects bypass
   double _boost = 1.0;
   List<double> _gains = List.filled(10, 0.0);
-  String _status = 'waiting';
+  Map<String, dynamic> _diag = {'status': 'idle'};
+
+  String get _status => (_diag['status'] ?? 'none').toString();
 
   @override
   void initState() {
@@ -90,25 +93,50 @@ class _ShellState extends State<Shell> {
   }
 
   Future<void> _push() => _web.runJavaScript(
-      'window.__ytEQ&&window.__ytEQ.set(${jsonEncode({'gains': _gains, 'boost': _boost, 'on': _fxOn})})');
+      'window.__ytEQ&&window.__ytEQ.set(${jsonEncode({'gains': _gains, 'boost': _boost, 'on': _fxOn, 'arm': _armed})})');
+
+  /// Every user-driven change goes through here: update UI, arm the engine, push.
+  void _change(VoidCallback fn) {
+    setState(() {
+      fn();
+      _armed = true;
+    });
+    _push();
+  }
 
   Future<void> _refreshStatus() async {
     if (_tab != 1 || !_engineOn) return;
     try {
       final r = await _web.runJavaScriptReturningResult(
-          'window.__ytEQ ? window.__ytEQ.status : "none"');
-      final s = r.toString().replaceAll('"', '');
-      if (mounted && s != _status) setState(() => _status = s);
+          "window.__ytEQ ? window.__ytEQ.diag() : '{\"status\":\"none\"}'");
+      dynamic j = jsonDecode(r.toString());
+      if (j is String) j = jsonDecode(j);
+      if (mounted && j is Map) setState(() => _diag = Map<String, dynamic>.from(j));
     } catch (_) {}
+  }
+
+  void _setEngine(bool on) {
+    setState(() {
+      _engineOn = on;
+      _diag = {'status': on ? 'idle' : 'off'};
+    });
+    _web.reload();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      // IndexedStack keeps the WebView alive while you're on the sound tab.
-      body: IndexedStack(index: _tab, children: [
+      // The WebView stays in the tree and on screen at all times (the sound page
+      // is drawn on top of it), so iOS never treats the player as hidden/paused.
+      body: Stack(children: [
         SafeArea(bottom: false, child: WebViewWidget(controller: _web)),
-        _soundPage(context),
+        if (_tab == 1)
+          Positioned.fill(
+            child: ColoredBox(
+              color: Theme.of(context).scaffoldBackgroundColor,
+              child: _soundPage(context),
+            ),
+          ),
       ]),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _tab,
@@ -133,31 +161,47 @@ class _ShellState extends State<Shell> {
     final small = t.textTheme.labelSmall;
     final (icon, color, text) = switch (_status) {
       'active' => (Icons.check_circle, Colors.greenAccent, 'Connected to the player'),
-      'waiting' => (Icons.hourglass_empty, Colors.amber, 'Open YT Music and play a song'),
+      'idle' => (Icons.touch_app, Colors.lightBlueAccent, 'Ready. Move a slider or pick a preset'),
+      'waiting' => (Icons.hourglass_empty, Colors.amber, 'Play a song in YT Music'),
       'blocked' => (Icons.lock_outline, Colors.amber, 'Audio engine waiting. Tap play in YT Music'),
-      'silent' => (Icons.volume_off, Colors.redAccent, 'No signal. This stream may not support EQ. Turn the engine off below'),
+      'silent' => (Icons.volume_off, Colors.redAccent, 'No signal. This stream can\'t be processed on this iPhone'),
+      'off' => (Icons.power_settings_new, Colors.grey, 'Audio engine is off'),
       'none' => (Icons.hourglass_empty, Colors.amber, 'Loading…'),
-      final s => (Icons.error_outline, Colors.redAccent, s),
+      final s => (Icons.error_outline, Colors.redAccent, 'Error: $s'),
     };
+    final d = _diag;
     return SafeArea(
       child: ListView(padding: const EdgeInsets.all(16), children: [
         Text('Personalize Sound', style: t.textTheme.headlineSmall),
         const SizedBox(height: 12),
         Card(
-          child: ListTile(
-            leading: Icon(_engineOn ? icon : Icons.power_settings_new,
-                color: _engineOn ? color : Colors.grey),
-            title: Text(_engineOn ? text : 'Audio engine is off'),
-          ),
+          child: Column(children: [
+            ListTile(leading: Icon(icon, color: color), title: Text(text)),
+            if (_status == 'silent')
+              Padding(
+                padding: const EdgeInsets.only(bottom: 12),
+                child: FilledButton(
+                  onPressed: () => _setEngine(false),
+                  child: const Text('Restore audio (reloads YT Music)'),
+                ),
+              ),
+            if (_engineOn && d.length > 1)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: SelectableText(
+                  'ctx ${d['ctx']} · hooked ${d['hooked']} · media ${d['media']} · '
+                  'paused ${d['paused']} · src ${d['src']}'
+                  '${(d['err'] ?? '').toString().isEmpty ? '' : ' · err ${d['err']}'}',
+                  style: small?.copyWith(color: Colors.grey),
+                ),
+              ),
+          ]),
         ),
         SwitchListTile(
           title: const Text('Sound effects'),
           subtitle: const Text('Turn off to hear the original sound'),
           value: _fxOn,
-          onChanged: (v) {
-            setState(() => _fxOn = v);
-            _push();
-          },
+          onChanged: (v) => _change(() => _fxOn = v),
         ),
         Card(
           child: Padding(
@@ -171,10 +215,7 @@ class _ShellState extends State<Shell> {
                 divisions: 20,
                 value: _boost,
                 label: '${(_boost * 100).round()}%',
-                onChanged: (v) {
-                  setState(() => _boost = v);
-                  _push();
-                },
+                onChanged: (v) => _change(() => _boost = v),
               ),
               Text('Above ~200% can sound harsh. A limiter is applied to reduce clipping.',
                   style: small),
@@ -198,10 +239,7 @@ class _ShellState extends State<Shell> {
                             min: -12,
                             max: 12,
                             value: _gains[i],
-                            onChanged: (v) {
-                              setState(() => _gains[i] = v);
-                              _push();
-                            },
+                            onChanged: (v) => _change(() => _gains[i] = v),
                           ),
                         ),
                       ),
@@ -215,10 +253,7 @@ class _ShellState extends State<Shell> {
                 for (final e in _presets.entries)
                   ActionChip(
                     label: Text(e.key),
-                    onPressed: () {
-                      setState(() => _gains = List.of(e.value));
-                      _push();
-                    },
+                    onPressed: () => _change(() => _gains = List.of(e.value)),
                   ),
               ]),
             ]),
@@ -228,13 +263,7 @@ class _ShellState extends State<Shell> {
           title: const Text('Audio engine'),
           subtitle: const Text('Turning this off reloads YT Music and restores untouched audio'),
           value: _engineOn,
-          onChanged: (v) {
-            setState(() {
-              _engineOn = v;
-              _status = 'waiting';
-            });
-            _web.reload();
-          },
+          onChanged: _setEngine,
         ),
       ]),
     );
